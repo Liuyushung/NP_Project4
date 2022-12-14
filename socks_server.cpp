@@ -16,7 +16,6 @@ using boost::asio::ip::tcp;
 using boost::asio::io_service;
 using namespace std;
 
-boost::asio::io_service my_io_service;
 boost::asio::io_context io_context;
 
 typedef struct socks_info {
@@ -89,11 +88,9 @@ inline void show_error(const char *func_name, int code, string msg) {
 
 class ProxyHandler: public enable_shared_from_this<ProxyHandler> {
 public:
-    ProxyHandler(tcp::socket sock): inner_sock(move(sock)), outer_sock(io_context), resolver_(io_context), acceptor_(io_context) {
-        bzero(inner_rx_buffer, BUFFER_SIZE);
-        bzero(inner_tx_buffer, BUFFER_SIZE);
-        bzero(outer_rx_buffer, BUFFER_SIZE);
-        bzero(outer_tx_buffer, BUFFER_SIZE);
+    ProxyHandler(tcp::socket sock): client_sock(move(sock)), server_sock(io_context), resolver_(io_context), acceptor_(io_context) {
+        bzero(client_buffer, BUFFER_SIZE);
+        bzero(server_buffer, BUFFER_SIZE);
 
         parse_firewall();
     }
@@ -101,7 +98,7 @@ public:
     void start() {
         check_firewall();
         if (request.is_accept == true) {
-            do_inner_read_control();
+            read_control_message_from_client();
         } else {
             // TODO
         }
@@ -117,20 +114,21 @@ public:
         request.is_accept = true;
     }
 
-    void do_inner_read_control() {
+    void read_control_message_from_client() {
         #if 0
-        cout << "do_inner_read_control" << endl;
+        cout << "read_control_message_from_client" << endl;
         #endif
         /* Handle SOCKS Request */
+        bzero(client_buffer, BUFFER_SIZE);
         auto self(shared_from_this());
-        inner_sock.async_read_some(boost::asio::buffer(inner_rx_buffer, BUFFER_SIZE),
+        client_sock.async_read_some(boost::asio::buffer(client_buffer, BUFFER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     // Get SOCKS Request
-                    request.version = inner_rx_buffer[0];
-                    request.command = inner_rx_buffer[1];
-                    request.port = raw_port(inner_rx_buffer[2], inner_rx_buffer[3]);
-                    request.address = raw_ip2str(inner_rx_buffer[4], inner_rx_buffer[5], inner_rx_buffer[6], inner_rx_buffer[7]);
+                    request.version = client_buffer[0];
+                    request.command = client_buffer[1];
+                    request.port = raw_port(client_buffer[2], client_buffer[3]);
+                    request.address = raw_ip2str(client_buffer[4], client_buffer[5], client_buffer[6], client_buffer[7]);
                     request.need_resolve = false;
 
                     // Check it it has hostname
@@ -138,15 +136,15 @@ public:
                         char tmp_buffer[256] = {'\0'};
 
                         int x = 8, idx = 0;
-                        while(inner_rx_buffer[x] != '\0') {
-                            tmp_buffer[idx] = inner_rx_buffer[x];
+                        while(client_buffer[x] != '\0') {
+                            tmp_buffer[idx] = client_buffer[x];
                             ++x;
                             ++idx;
                         }
 
                         request.hostname = string(tmp_buffer);
                         request.need_resolve = true;
-                        #if 0
+                        #if 1
                         cout << "Request.Hostname: " << request.hostname << endl;
                         #endif
                     }
@@ -182,28 +180,17 @@ public:
 
     void handle_bind() {
         // Bind a random port on SOCKS Server
-        auto self(shared_from_this());
-        uint16_t port;
+        tcp::endpoint ep(tcp::v4(), 0);
 
-        while (true) {
-            boost::system::error_code ec;
-            port = rand() % 10000 + 30000;
-            tcp::endpoint ep(tcp::v4(), port);
-            acceptor_.open(ep.protocol());
-
-            acceptor_.bind(ep, ec);
-            if (!ec) {
-                break;
-            } else {
-                acceptor_.close();
-            }
-        }
+        acceptor_.open(ep.protocol());
+        acceptor_.bind(ep);
         acceptor_.listen();
-        request.bind_port = port;
+        request.bind_port = acceptor_.local_endpoint().port();
+
         do_write_reply();
 
-        #if 0
-        cout << "Bind Port: " << request.bind_port << endl;
+        #if 1
+        cout << "\tBind Port: " << request.bind_port << endl;
         #endif
     }
 
@@ -218,7 +205,7 @@ public:
                 if (!ec) {
                     do_connect(iter);
                 } else {
-                    perror("Do resolve");
+                    show_error("do_resolve", ec.value(), ec.message());
                 }
             }
         );
@@ -234,7 +221,7 @@ public:
         #endif
 
         auto self(shared_from_this());
-        outer_sock.async_connect(remote_ep, 
+        server_sock.async_connect(remote_ep,
             [this, self](boost::system::error_code ec) {
                 if (!ec) {
                     request.is_accept = true;
@@ -254,7 +241,7 @@ public:
         cout << "do_connect with iter" << endl;
         #endif
         auto self(shared_from_this());
-        outer_sock.async_connect(*iter,
+        server_sock.async_connect(*iter,
             [this, self, iter](boost::system::error_code ec) {
                 if (!ec) {
                     request.is_accept = true;
@@ -289,7 +276,7 @@ public:
         }
 
         auto self(shared_from_this());
-        inner_sock.async_write_some(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
+        client_sock.async_write_some(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     if (request.is_accept) {
@@ -321,10 +308,11 @@ public:
         acceptor_.async_accept(
             [this, self](boost::system::error_code ec, tcp::socket socket) {
                 if (!ec) {
-                    outer_sock = move(socket);
+                    server_sock = move(socket);
                 } else {
                     show_error("ProxyHandler do_accept", ec.value(), ec.message());
                 }
+                // add_pairs(client_sock.remote_endpoint(), server_sock.remote_endpoint());
 
                 // Only accept one connection
                 acceptor_.close();
@@ -335,108 +323,109 @@ public:
     }
 
     void start_data_session() {
-        do_inner_data_read();
-        do_outer_data_read();
+        read_from_client();
+        read_from_server();
     }
 
-    void do_inner_data_read() {
+    void read_from_client() {
         #if 0
-        cout << "do_inner_data_read waiting..." << endl;
+        cout << "read_from_client waiting..." << endl;
         #endif
         auto self(shared_from_this());
-        inner_sock.async_read_some(boost::asio::buffer(inner_rx_buffer, BUFFER_SIZE),
+        client_sock.async_read_some(boost::asio::buffer(server_buffer, BUFFER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     #if 0
-                    cout << "do_inner_data_read got " << length << " data" << endl;
+                    cout << "read_from_client got " << length << " data" << endl;
                     #endif
-                    // Copy data to outgoing buffer
-                    memcpy(outer_tx_buffer, inner_rx_buffer, length);
-                    // Clean inner rx buffer
-                    memset(inner_rx_buffer, '\0', length);
 
-                    do_outer_data_write(length);
-                    do_inner_data_read();
+                    send_to_server(length);
                 } else {
                     if (ec.value() == boost::asio::error::eof) {
-                        do_close();
+                        cout << client_sock.remote_endpoint().address().to_string() << ":"
+                            << client_sock.remote_endpoint().port()
+                            << " Close connection" << endl;
                     } else if (ec.value() == 125) {
-                        // Ignore Operation canceled
+                        // Close by another connection
                     } else {
-                        show_error("do_inner_data_read", ec.value(), ec.message());
-                        do_close();
+                        show_error("read_from_client", ec.value(), ec.message());
                     }
-                }
-            }
-        );
-    }
-    
-    void do_inner_data_write(size_t data_length) {
-        #if 0
-        cout << "do_inner_data_write" << endl;
-        #endif
-        auto self(shared_from_this());
-        inner_sock.async_write_some(boost::asio::buffer(inner_tx_buffer, data_length),
-            [this, self](boost::system::error_code ec, size_t length) {
-                if (!ec) {
-                    #if 0
-                    cout << "do_inner_data_write write " << length << " data" << endl;
-                    #endif
-                    // Clean Buffer
-                    memset(inner_tx_buffer, '\0', length);
-                } else {
-                    show_error("do_inner_data_write", ec.value(), ec.message());
                     do_close();
                 }
             }
         );
     }
 
-    void do_outer_data_read() {
+    void send_to_server(size_t data_length) {
         #if 0
-        cout << "do_outer_data_read waiting..." << endl;
+        cout << "send_to_server" << endl;
         #endif
         auto self(shared_from_this());
-        outer_sock.async_read_some(boost::asio::buffer(outer_rx_buffer, BUFFER_SIZE),
+        server_sock.async_write_some(boost::asio::buffer(server_buffer, data_length),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     #if 0
-                    cout << "do_outer_data_read got " << length << " data" << endl;
+                    cout << "send_to_server write " << length << " data" << endl;
                     #endif
-                    // Copy data to inner tx buffer
-                    memcpy(inner_tx_buffer, outer_rx_buffer, length);
-                    // Clean outer rx buffer
-                    memset(outer_rx_buffer, '\0', length);
-
-                    do_inner_data_write(length);
-                    do_outer_data_read();
+                    // Clean Buffer
+                    bzero(server_buffer, BUFFER_SIZE);
+                    
+                    read_from_client();
                 } else {
-                    if (ec.value() == boost::asio::error::eof) {
-                        do_close();
-                    } else {
-                        show_error("do_inner_data_read", ec.value(), ec.message());
-                        do_close();
-                    }
+                    show_error("send_to_server", ec.value(), ec.message());
+                    do_close();
                 }
             }
         );
     }
 
-    void do_outer_data_write(size_t data_length) {
+    void read_from_server() {
         #if 0
-        cout << "do_outer_data_write" << endl;
+        cout << "read_from_server waiting..." << endl;
         #endif
         auto self(shared_from_this());
-        outer_sock.async_write_some(boost::asio::buffer(outer_tx_buffer, data_length),
+        server_sock.async_read_some(boost::asio::buffer(client_buffer, BUFFER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     #if 0
-                    cout << "do_outer_data_write write " << length << " data" << endl;
+                    cout << "read_from_server got " << length << " data" << endl;
+                    #endif
+
+                    send_to_client(length);
+                } else {
+                    if (ec.value() == boost::asio::error::eof) {
+                        cout << server_sock.remote_endpoint().address().to_string() << ":"
+                            << server_sock.remote_endpoint().port()
+                            << " Close connection" << endl;
+                    } else if (ec.value() == 125) {
+                        // Close by another connection
+                    } else {
+                        show_error("read_from_server", ec.value(), ec.message());
+                    }
+
+                    do_close();
+                }
+            }
+        );
+    }
+    
+    void send_to_client(size_t data_length) {
+        #if 0
+        cout << "send_to_client" << endl;
+        #endif
+        auto self(shared_from_this());
+        client_sock.async_write_some(boost::asio::buffer(client_buffer, data_length),
+            [this, self](boost::system::error_code ec, size_t length) {
+                if (!ec) {
+                    #if 0
+                    cout << "send_to_client write " << length << " data" << endl;
                     #endif
                     // Clean Buffer
-                    memset(outer_tx_buffer, '\0', length);
+                    bzero(client_buffer, BUFFER_SIZE);
+
+                    read_from_server();
                 } else {
-                    show_error("do_outer_data_write", ec.value(), ec.message());
+                    show_error("send_to_client", ec.value(), ec.message());
                     do_close();
                 }
             }
@@ -447,13 +436,13 @@ public:
         #if 0
         cout << "do_close" << endl;
         #endif
-        inner_sock.close();
-        outer_sock.close();
+        client_sock.close();
+        server_sock.close();
     }
 
     void show_socks() {
-        string src_ip_addr = inner_sock.remote_endpoint().address().to_string();
-        string src_port = to_string(static_cast<unsigned short>(inner_sock.remote_endpoint().port()));
+        string src_ip_addr = client_sock.remote_endpoint().address().to_string();
+        string src_port = to_string(static_cast<unsigned short>(client_sock.remote_endpoint().port()));
 
         cout << "<S_IP>: " << src_ip_addr << endl
             << "<S_PORT>: " << src_port << endl
@@ -464,15 +453,13 @@ public:
     }
 
 private:
-    tcp::socket inner_sock, outer_sock;
+    tcp::socket client_sock, server_sock;
     SocksInfo request;
     tcp::resolver resolver_;
     tcp::acceptor acceptor_;
     
-    char inner_rx_buffer[BUFFER_SIZE];
-    char inner_tx_buffer[BUFFER_SIZE];
-    char outer_rx_buffer[BUFFER_SIZE];
-    char outer_tx_buffer[BUFFER_SIZE];
+    char client_buffer[BUFFER_SIZE];
+    char server_buffer[BUFFER_SIZE];
 };
 
 class Server {
