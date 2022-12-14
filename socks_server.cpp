@@ -8,7 +8,7 @@
 #include <sys/wait.h>
 #include <arpa/inet.h>
 
-#define BUFFER_SIZE         4096
+#define BUFFER_SIZE         65535
 #define SOCKS_REPLY_SIZE    1+1+2+4
 
 using boost::asio::ip::address;
@@ -181,7 +181,9 @@ public:
     void handle_bind() {
         // Bind a random port on SOCKS Server
         tcp::endpoint ep(tcp::v4(), 0);
+        boost::asio::socket_base::reuse_address option(true);
 
+        acceptor_.set_option(option);
         acceptor_.open(ep.protocol());
         acceptor_.bind(ep);
         acceptor_.listen();
@@ -189,7 +191,7 @@ public:
 
         do_write_reply();
 
-        #if 1
+        #if 0
         cout << "\tBind Port: " << request.bind_port << endl;
         #endif
     }
@@ -276,7 +278,7 @@ public:
         }
 
         auto self(shared_from_this());
-        client_sock.async_write_some(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
+        client_sock.async_send(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     if (request.is_accept) {
@@ -293,7 +295,7 @@ public:
                         do_close();
                     }
 
-                    show_socks();
+                    // show_socks();
                 } else {
                     show_error("do_write_reply", ec.value(), ec.message());
                     do_close();
@@ -331,6 +333,8 @@ public:
         #if 0
         cout << "read_from_client waiting..." << endl;
         #endif
+
+        bzero(server_buffer, BUFFER_SIZE);
         auto self(shared_from_this());
         client_sock.async_read_some(boost::asio::buffer(server_buffer, BUFFER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
@@ -342,15 +346,20 @@ public:
                     send_to_server(length);
                 } else {
                     if (ec.value() == boost::asio::error::eof) {
-                        cout << client_sock.remote_endpoint().address().to_string() << ":"
-                            << client_sock.remote_endpoint().port()
-                            << " Close connection" << endl;
-                    } else if (ec.value() == 125) {
-                        // Close by another connection
+                        // Client close the connection
+                        #if 0
+                        cout << "Shutdown C -> S" << endl;
+                        #endif
+                        send_to_server(length);
+                        server_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                    } else if (ec.value() == boost::asio::error::operation_aborted) {
+                        // Stop doing anything
+                    } else if (ec.value() == boost::asio::error::connection_reset || ec.value() == boost::asio::error::bad_descriptor) {
+                        client_sock.close();
+                        server_sock.cancel();
                     } else {
                         show_error("read_from_client", ec.value(), ec.message());
                     }
-                    do_close();
                 }
             }
         );
@@ -360,20 +369,23 @@ public:
         #if 0
         cout << "send_to_server" << endl;
         #endif
+
         auto self(shared_from_this());
-        server_sock.async_write_some(boost::asio::buffer(server_buffer, data_length),
+        server_sock.async_send(boost::asio::buffer(server_buffer, data_length),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     #if 0
                     cout << "send_to_server write " << length << " data" << endl;
                     #endif
-                    // Clean Buffer
-                    bzero(server_buffer, BUFFER_SIZE);
-                    
-                    read_from_client();
+                    if (length > 0) {
+                        read_from_client();
+                    }
+                } else if (ec.value() == boost::asio::error::operation_aborted) {
+                    #if 1
+                    cout << "send_to_server aborted" << endl;
+                    #endif
                 } else {
                     show_error("send_to_server", ec.value(), ec.message());
-                    do_close();
                 }
             }
         );
@@ -383,6 +395,8 @@ public:
         #if 0
         cout << "read_from_server waiting..." << endl;
         #endif
+
+        bzero(client_buffer, BUFFER_SIZE);
         auto self(shared_from_this());
         server_sock.async_read_some(boost::asio::buffer(client_buffer, BUFFER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
@@ -394,16 +408,19 @@ public:
                     send_to_client(length);
                 } else {
                     if (ec.value() == boost::asio::error::eof) {
-                        cout << server_sock.remote_endpoint().address().to_string() << ":"
-                            << server_sock.remote_endpoint().port()
-                            << " Close connection" << endl;
-                    } else if (ec.value() == 125) {
-                        // Close by another connection
+                        // Server close the connection
+                        #if 0
+                        cout << "Shutdown S -> C" << endl;
+                        #endif
+                        send_to_client(length);
+                        client_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                    } else if (ec.value() == boost::asio::error::operation_aborted) {
+                        #if 0
+                        cout << "read_from_server aborted" << endl;
+                        #endif
                     } else {
                         show_error("read_from_server", ec.value(), ec.message());
                     }
-
-                    do_close();
                 }
             }
         );
@@ -413,20 +430,36 @@ public:
         #if 0
         cout << "send_to_client" << endl;
         #endif
+
         auto self(shared_from_this());
-        client_sock.async_write_some(boost::asio::buffer(client_buffer, data_length),
-            [this, self](boost::system::error_code ec, size_t length) {
+        client_sock.async_send(boost::asio::buffer(client_buffer, data_length),
+            [this, self, data_length](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     #if 0
                     cout << "send_to_client write " << length << " data" << endl;
                     #endif
-                    // Clean Buffer
-                    bzero(client_buffer, BUFFER_SIZE);
 
-                    read_from_server();
+                    if (length > 0) {
+                        read_from_server();
+                    }
+                } else if (ec.value() == boost::asio::error::operation_aborted) {
+                    #if 1
+                    cout << "send_to_client aborted" << endl;
+                    #endif
+                    client_sock.close();
+                } else if (ec.value() == boost::asio::error::broken_pipe) {
+                    // Write on a closed socket
+                    // Peer has already close the socket
+                    client_sock.cancel();
+                } else if (ec.value() == boost::asio::error::bad_descriptor) {
+                    // Local has aready close the socket
+                } else if (ec.value() == boost::asio::error::connection_reset) {
+                    // Read on a closed socket
+                    // Peer has already close the socket
+                    client_sock.close();
+                    server_sock.cancel();
                 } else {
                     show_error("send_to_client", ec.value(), ec.message());
-                    do_close();
                 }
             }
         );
@@ -505,7 +538,7 @@ private:
 int main(int argc, char* argv[]) {
     try {
         if (argc != 2) {
-            cerr << "Usage: http_server <port>\n";
+            cerr << "Usage: socks_server <port>\n";
             return 1;
         }
         signal(SIGCHLD, signal_server_handler);
