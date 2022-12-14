@@ -181,15 +181,16 @@ public:
     void handle_bind() {
         // Bind a random port on SOCKS Server
         tcp::endpoint ep(tcp::v4(), 0);
-        boost::asio::socket_base::reuse_address option(true);
 
-        acceptor_.set_option(option);
         acceptor_.open(ep.protocol());
         acceptor_.bind(ep);
         acceptor_.listen();
         request.bind_port = acceptor_.local_endpoint().port();
 
+        // Bind: First reply
         do_write_reply();
+        // Wait server establish connection
+        do_accept();
 
         #if 0
         cout << "\tBind Port: " << request.bind_port << endl;
@@ -288,14 +289,14 @@ public:
                             start_data_session();
                         } else {
                             /* BIND */
-                            do_accept();
+                            // do_accept();
                         }
                     } else {
                         /* Reject */
                         do_close();
                     }
 
-                    // show_socks();
+                    show_socks();
                 } else {
                     show_error("do_write_reply", ec.value(), ec.message());
                     do_close();
@@ -314,10 +315,12 @@ public:
                 } else {
                     show_error("ProxyHandler do_accept", ec.value(), ec.message());
                 }
-                // add_pairs(client_sock.remote_endpoint(), server_sock.remote_endpoint());
-
                 // Only accept one connection
                 acceptor_.close();
+
+                // Bind: Second reply
+                do_write_reply();
+
                 // Start data session
                 start_data_session();
             }
@@ -351,7 +354,11 @@ public:
                         cout << "Shutdown C -> S" << endl;
                         #endif
                         send_to_server(length);
-                        server_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                        try {
+                            server_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                        } catch (exception &e) {
+                            // Transport endpoint is not connected
+                        }
                     } else if (ec.value() == boost::asio::error::operation_aborted) {
                         // Stop doing anything
                     } else if (ec.value() == boost::asio::error::connection_reset || ec.value() == boost::asio::error::bad_descriptor) {
@@ -413,7 +420,11 @@ public:
                         cout << "Shutdown S -> C" << endl;
                         #endif
                         send_to_client(length);
-                        client_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                        try {
+                            client_sock.shutdown(boost::asio::ip::tcp::socket::shutdown_send);
+                        } catch (exception &e) {
+                            // Transport endpoint is not connected
+                        }
                     } else if (ec.value() == boost::asio::error::operation_aborted) {
                         #if 0
                         cout << "read_from_server aborted" << endl;
@@ -546,7 +557,7 @@ int main(int argc, char* argv[]) {
         Server server_(atoi(argv[1]));
 
         io_context.run();
-    } catch (exception& e) {
+    } catch (exception &e) {
         cerr << "Exception: " << e.what() << "\n";
     }
 
