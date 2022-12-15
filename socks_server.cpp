@@ -1,5 +1,7 @@
 #include <cstdlib>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <memory>
 #include <utility>
 #include <strings.h>
@@ -96,22 +98,74 @@ public:
     }
 
     void start() {
-        check_firewall();
-        if (request.is_accept == true) {
-            read_control_message_from_client();
-        } else {
-            // TODO
-        }
+        read_control_message_from_client();
     }
 
     void parse_firewall() {
-        // TODO
+        ifstream config_file("socks.conf");
+        string line;
+
+        while(getline(config_file, line)) {
+            istringstream iss(line);
+            string type, value;
+            vector<string> tmp;
+
+            getline(iss, value, ' '); // Ignore operation
+            getline(iss, type, ' '); // Get type
+
+            // Parse IP address
+            while(getline(iss, value, '.')) {
+                tmp.push_back(value);
+            }
+
+            if (type.compare("b") == 0) {
+                /* Bind */
+                bind_firewall_rules.push_back(tmp);
+            } else if (type.compare("c") == 0) {
+                /* Connect */
+                connect_firewall_rules.push_back(tmp);
+            } else {
+                cerr << "Unknown type: " << type << endl;
+            }
+        }
+
+        config_file.close();
     }
 
-    void check_firewall() {
-        // TODO
+    bool check_firewall(vector<vector<string>> &firewall_rules, string address) {
+        bool result = false;
 
-        request.is_accept = true;
+        if (firewall_rules.size() == 0) {
+            // No rule for connect, default is deny
+            return result;
+        }
+
+        int n[4];
+        sscanf(address.c_str(), "%d.%d.%d.%d", &n[0], &n[1], &n[2], &n[3]);
+
+        for(size_t x=0; x < firewall_rules.size(); ++x) {
+            for(size_t y=0; y < firewall_rules[x].size(); ++y) {
+                if (firewall_rules[x][y].compare("*") == 0) {
+                    // Wild Card
+                    result = true;
+                    goto done;
+                } else if (firewall_rules[x][y].compare(to_string(n[y])) == 0) {
+                    // Pass
+                    if (y == 3) {
+                        // All pass
+                        result = true;
+                        goto done;
+                    }
+                    continue;
+                } else {
+                    result = false;
+                    break;
+                }
+            }
+        }
+
+    done:
+        return result;
     }
 
     void read_control_message_from_client() {
@@ -149,20 +203,32 @@ public:
                         #endif
                     }
 
-                    // Handle by command
-                    switch (request.command) {
-                    case COMMAND_CONNECT:
-                        handle_connect();
-                        break;
-                    case COMMAND_BIND:
-                        handle_bind();
-                        break;
-                    default:
-                        cerr << "Unknown command: " << request.command << endl;
-                        break;
+                    // Check firewall rules
+                    request.is_accept = check_firewall(
+                        ((request.command == COMMAND_CONNECT) ? connect_firewall_rules : bind_firewall_rules),
+                        request.address
+                    );
+
+                    if (request.is_accept) {
+                        /* Accept */
+                        // Handle by command
+                        switch (request.command) {
+                        case COMMAND_CONNECT:
+                            handle_connect();
+                            break;
+                        case COMMAND_BIND:
+                            handle_bind();
+                            break;
+                        default:
+                            cerr << "Unknown command: " << request.command << endl;
+                            break;
+                        }
+                    } else {
+                        /* Reject */
+                        do_write_reply();
                     }
                 } else {
-                    show_error("do_inner_read", ec.value(), ec.message());
+                    show_error("read_control_message_from_client", ec.value(), ec.message());
                     do_close();
                 }
             }
@@ -282,6 +348,8 @@ public:
         client_sock.async_send(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
+                    show_socks();
+
                     if (request.is_accept) {
                         /* Accept */
                         if (request.command == COMMAND_CONNECT) {
@@ -289,14 +357,11 @@ public:
                             start_data_session();
                         } else {
                             /* BIND */
-                            // do_accept();
                         }
                     } else {
                         /* Reject */
                         do_close();
                     }
-
-                    show_socks();
                 } else {
                     show_error("do_write_reply", ec.value(), ec.message());
                     do_close();
@@ -504,6 +569,9 @@ private:
     
     char client_buffer[BUFFER_SIZE];
     char server_buffer[BUFFER_SIZE];
+
+    vector<vector<string>> connect_firewall_rules;
+    vector<vector<string>> bind_firewall_rules;
 };
 
 class Server {
