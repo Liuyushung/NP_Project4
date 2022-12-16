@@ -9,6 +9,7 @@
 #define MAX_SERVER      5
 #define ATTRIBUTES_SIZE 3
 #define BUFFER_SIZE     4096
+#define SOCKS_HEADER_SIZE  1+1+2+4 
 
 using boost::asio::ip::tcp;
 using namespace std;
@@ -19,8 +20,20 @@ typedef struct client_info {
     string fname;
     bool   is_active;
 } ClientInfo;
-// ClientInfo clients[MAX_SERVER];
+
+const uint8_t SOCK4_VERSION   = 04;
+const uint8_t COMMAND_CONNECT = 1;
+const uint8_t COMMAND_BIND    = 2;
+const uint8_t COMMAND_ACCEPT  = 90;
+const uint8_t COMMAND_REJECT  = 91;
+
 vector<ClientInfo> clients;
+string socks_server_hostname;
+string socks_server_port;
+
+inline void show_error(const char *func_name, int code, string msg) {
+    fprintf(stderr, "[%s]: (%d, %s)\n", func_name, code, msg.c_str());
+}
 
 class session: public enable_shared_from_this<session> {
 public:
@@ -41,19 +54,23 @@ public:
         #if 0
         cerr << "Sesion " << session_id << " start" << endl;
         #endif
-        do_resolve();
+        // do_resolve(clients[session_id].host, clients[session_id].port);
+        do_resolve(socks_server_hostname, socks_server_port);
     }
 
-    void do_resolve() {
-        tcp::resolver::query q(clients[session_id].host, clients[session_id].port);
+    void do_resolve(string hostname, string port) {
+        tcp::resolver::query q(hostname, port);
 
         auto self(shared_from_this());
         resolver_.async_resolve(q,
             [this, self](boost::system::error_code ec, tcp::resolver::iterator iter) {
                 if (!ec) {
+                    #if 1
+                    cerr << "Resolve reuslt: " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
+                    #endif
                     do_connect(iter);
                 } else {
-                    perror("Do resolve");
+                    show_error("do_resolve", ec.value(), ec.message());
                 }
             }
         );
@@ -64,14 +81,72 @@ public:
         sock.async_connect(*iter,
             [this, self, iter](boost::system::error_code ec) {
                 if (!ec) {
-                    do_read();
+                    handle_SOCKS();
                 } else {
-                    perror("Do connect");
+                    cerr << "Connect to " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
+                    show_error("do_connect", ec.value(), ec.message());
                     sock.close();
-                    do_connect(iter);
                 }
             }
         );
+    }
+
+    void handle_SOCKS() {
+        /* Build SOCKS CONNECT Request */
+        uint32_t request_size = SOCKS_HEADER_SIZE + clients[session_id].host.length() + 1;
+        char *request = (char *)malloc(request_size);
+        bzero(request, request_size);
+
+        // Version
+        request[0] = SOCK4_VERSION;
+        // Command
+        request[1] = COMMAND_CONNECT;
+        // Port
+        uint16_t port = static_cast<uint16_t>(stoi(clients[session_id].port));
+        request[2] = port / 256;
+        request[3] = port % 256;
+        // IP Address, Filled by zero
+        // Hostname
+        memcpy(&request[SOCKS_HEADER_SIZE], clients[session_id].host.c_str(), clients[session_id].host.length());
+
+        /* Send SOCKS CONNECT Request */
+        auto self(shared_from_this());
+        sock.async_send(boost::asio::buffer(request, request_size),
+            [this, self](boost::system::error_code ec, size_t length) {
+                if (!ec) {
+                    // Do nothing
+                } else {
+                    show_error("[handle_SOCKS]: send reqeust", ec.value(), ec.message());
+                }
+            }
+        );
+
+        /* Read SOCKS Reply */
+        char reply[SOCKS_HEADER_SIZE] = {'\0'};
+        sock.async_receive(boost::asio::buffer(reply, SOCKS_HEADER_SIZE),
+            [this, self, reply](boost::system::error_code ec, size_t length) {
+                if (!ec) {
+                    uint8_t command = reply[1];
+
+                    switch (command) {
+                    case COMMAND_ACCEPT:
+                        // Start Data Session
+                        do_read();
+                        break;
+                    case COMMAND_REJECT:
+                        // Close connection
+                        sock.close();
+                        break;
+                    default:
+                        cerr << "Unknown command: " << command << endl;
+                    }
+
+                } else {
+                    show_error("handle_SOCKS, receive reply", ec.value(), ec.message());
+                }
+            }
+        );
+
     }
 
     void do_read() {
@@ -184,10 +259,6 @@ void debug_clients() {
     cerr << "Active sessions: " << n << endl;
 }
 
-void init_global() {
-    // bzero(clients, sizeof(ClientInfo)*5);
-}
-
 vector<string> my_split(string str, char delimeter) {
     stringstream ss(str);
     string token;
@@ -209,42 +280,59 @@ void parse_query() {
     cerr << query << endl;
     #endif
 
+    // Example: h0=nplinux1.cs.nctu.edu.tw&p0=65530&f0=t1.txt&h1=nplinux2.cs.nctu.edu.tw&p1=65531&f1=t2.txt&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=npbsd1.cs.nctu.edu.tw&sp=8787
     raw_queries = my_split(query, '&');
 
     for (auto &s: raw_queries) {
         int x = s.find("=");
         string value;
-        if (s.length() == 3) {
-            continue;
+
+        if (s.find("sh") != string::npos) {
+            // Retrieve SOCKS server hostname
+            socks_server_hostname = s.substr(x+1, s.length() - x - 1);
+
+        } else if (s.find("sp") != string::npos) {
+            // Retrieve SOCKS server port
+            socks_server_port = s.substr(x+1, s.length() - x - 1);
         } else {
-            value = s.substr(x+1, s.length() - x - 1);
-        }
+            // Handle RWD server hostname, port and file name
+            if (s.length() == 3) {
+                // Only key, no value, ignore
+                continue;
+            } else {
+                value = s.substr(x+1, s.length() - x - 1);
+            }
 
-        switch (counter % ATTRIBUTES_SIZE) {
-            case 0:
-                /* host */
-                host = value;
-                break;
-            case 1:
-                /* port */
-                port = value;
-                break;
-            case 2:
-                /* file */
-                fname = value;
-                break;
-        }
-        ++counter;
+            switch (counter % ATTRIBUTES_SIZE) {
+                case 0:
+                    /* host */
+                    host = value;
+                    break;
+                case 1:
+                    /* port */
+                    port = value;
+                    break;
+                case 2:
+                    /* file */
+                    fname = value;
+                    break;
+            }
+            ++counter;
 
-        if (host != "" && port != "" && fname != "") {
-            ClientInfo client = { host, port, fname, true };
-            clients.push_back(client);
-            host.clear();
-            port.clear();
-            fname.clear();
+            if (host != "" && port != "" && fname != "") {
+                ClientInfo client = { host, port, fname, true };
+                clients.push_back(client);
+                host.clear();
+                port.clear();
+                fname.clear();
+            }
         }
     }
 
+    #if 1
+    cerr << "SOCKS Server: " << socks_server_hostname << ":" << socks_server_port << endl;
+    #endif
+    
     return;
 }
 
@@ -311,15 +399,15 @@ void print_table(int session_id, string host, string port){
 int main(int argc, char *argv[]) {
     // setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=65531&f0=t1.txt&h1=nplinux2.cs.nctu.edu.tw&p1=65532&f1=t2.txt&h2=nplinux3.cs.nctu.edu.tw&p2=65533&f2=t3.txt&h3=nplinux4.cs.nctu.edu.tw&p3=65534&f3=t4.txt&h4=nplinux5.cs.nctu.edu.tw&p4=65535&f4=t5.txt", 1);
     // setenv("QUERY_STRING", "h0=nplinux2.cs.nctu.edu.tw&p0=43645&f0=t1.txt&h1=nplinux2.cs.nctu.edu.tw&p1=44899&f1=t2.txt&h2=nplinux2.cs.nctu.edu.tw&p2=35451&f2=t3.txt&h3=&p3=&f3=&h4=&p4=&f4=", 1);
-    // setenv("QUERY_STRING", "h0=nplinux2.cs.nctu.edu.tw&p0=65531&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=", 1);
-    init_global();
+    setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=nplinux6.cs.nctu.edu.tw&sp=8787", 1);
+    // setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=socks&sp=8787", 1);
     parse_query();
-    print_html();
-    for (size_t i = 0; i < clients.size(); i++) {
-        if (clients[i].is_active) {
-            print_table(i, clients[i].host, clients[i].port);
-        }
-    }
+    // print_html();
+    // for (size_t i = 0; i < clients.size(); i++) {
+    //     if (clients[i].is_active) {
+    //         print_table(i, clients[i].host, clients[i].port);
+    //     }
+    // }
 
     #if 0
     debug_clients();

@@ -11,7 +11,7 @@
 #include <arpa/inet.h>
 
 #define BUFFER_SIZE         65535
-#define SOCKS_REPLY_SIZE    1+1+2+4
+#define SOCKS_HEADER_SIZE    1+1+2+4
 
 using boost::asio::ip::address;
 using boost::asio::ip::tcp;
@@ -316,6 +316,9 @@ public:
                     request.is_accept = true;
                     do_write_reply();
                 } else {
+                    #if 1
+                    cerr << "Connect to " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
+                    #endif
                     show_error("do_connect with iter", ec.value(), ec.message());
                     request.is_accept = false;
                     do_write_reply();
@@ -329,7 +332,7 @@ public:
         #if 0
         cout << "do_write_reply" << endl;
         #endif
-        char reply[SOCKS_REPLY_SIZE] = {'\0'};
+        char reply[SOCKS_HEADER_SIZE] = {'\0'};
 
         // Version
         reply[0] = 0;
@@ -345,7 +348,7 @@ public:
         }
 
         auto self(shared_from_this());
-        client_sock.async_send(boost::asio::buffer(reply, SOCKS_REPLY_SIZE),
+        client_sock.async_send(boost::asio::buffer(reply, SOCKS_HEADER_SIZE),
             [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
                     show_socks();
