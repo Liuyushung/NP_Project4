@@ -91,9 +91,14 @@ inline void show_error(const char *func_name, int code, string msg) {
 class ProxyHandler: public enable_shared_from_this<ProxyHandler> {
 public:
     ProxyHandler(tcp::socket sock): client_sock(move(sock)), server_sock(io_context), resolver_(io_context), acceptor_(io_context) {
+        // Initialize buffer
         bzero(client_buffer, BUFFER_SIZE);
         bzero(server_buffer, BUFFER_SIZE);
 
+        // Setup client endpoint for showing message
+        client_ep = client_sock.remote_endpoint();
+
+        // Parse firewall rules
         parse_firewall();
     }
 
@@ -168,6 +173,33 @@ public:
         return result;
     }
 
+    void do_firewall_check() {
+        // Check firewall rules
+        request.is_accept = check_firewall(
+            ((request.command == COMMAND_CONNECT) ? connect_firewall_rules : bind_firewall_rules),
+            request.address
+        );
+
+        if (request.is_accept) {
+            /* Accept */
+            // Handle by command
+            switch (request.command) {
+            case COMMAND_CONNECT:
+                handle_connect();
+                break;
+            case COMMAND_BIND:
+                handle_bind();
+                break;
+            default:
+                cerr << "Unknown command: " << request.command << endl;
+                break;
+            }
+        } else {
+            /* Reject */
+            do_write_reply();
+        }
+    }
+
     void read_control_message_from_client() {
         #if 0
         cout << "read_control_message_from_client" << endl;
@@ -186,6 +218,7 @@ public:
                     request.need_resolve = false;
 
                     // Check it it has hostname
+                    // TODO: regex
                     if (request.address.find("0.0.0.") != string::npos) {
                         char tmp_buffer[256] = {'\0'};
 
@@ -203,29 +236,12 @@ public:
                         #endif
                     }
 
-                    // Check firewall rules
-                    request.is_accept = check_firewall(
-                        ((request.command == COMMAND_CONNECT) ? connect_firewall_rules : bind_firewall_rules),
-                        request.address
-                    );
-
-                    if (request.is_accept) {
-                        /* Accept */
-                        // Handle by command
-                        switch (request.command) {
-                        case COMMAND_CONNECT:
-                            handle_connect();
-                            break;
-                        case COMMAND_BIND:
-                            handle_bind();
-                            break;
-                        default:
-                            cerr << "Unknown command: " << request.command << endl;
-                            break;
-                        }
+                    if (request.need_resolve) {
+                        // SOCKS 4a
+                        do_resolve();
                     } else {
-                        /* Reject */
-                        do_write_reply();
+                        setup_server_endpoint(request.address, request.port);
+                        do_firewall_check();
                     }
                 } else {
                     show_error("read_control_message_from_client", ec.value(), ec.message());
@@ -237,11 +253,7 @@ public:
 
     void handle_connect() {
         // Establish the connection to foreign server
-        if(request.need_resolve) {
-            do_resolve();
-        } else {
-            do_connect();
-        }
+        do_connect();
     }
 
     void handle_bind() {
@@ -272,7 +284,9 @@ public:
         resolver_.async_resolve(q,
             [this, self](boost::system::error_code ec, tcp::resolver::iterator iter) {
                 if (!ec) {
-                    do_connect(iter);
+                    request.address = iter->endpoint().address().to_string(); // firewall check need
+                    setup_server_endpoint(request.address, request.port);
+                    do_firewall_check();
                 } else {
                     show_error("do_resolve", ec.value(), ec.message());
                 }
@@ -282,44 +296,18 @@ public:
 
     void do_connect() {
         #if 0
-        cout << "do_connect" << endl;
-        #endif
-        tcp::endpoint remote_ep(address::from_string(request.address), request.port);
-        #if 0
-        cout << "Connect to: " << remote_ep.address().to_string() << ":" << remote_ep.port() << endl;
+        cout << "Connect to: " << server_ep.address().to_string() << ":" << server_ep.port() << endl;
         #endif
 
         auto self(shared_from_this());
-        server_sock.async_connect(remote_ep,
+        server_sock.async_connect(server_ep,
             [this, self](boost::system::error_code ec) {
                 if (!ec) {
+                    // Connect successfully
                     request.is_accept = true;
                     do_write_reply();
                 } else {
                     show_error("do_connect", ec.value(), ec.message());
-                    request.is_accept = false;
-                    do_write_reply();
-                    do_close();
-                }
-            }
-        );
-    }
-
-    void do_connect(tcp::resolver::iterator iter) {
-        #if 0
-        cout << "do_connect with iter" << endl;
-        #endif
-        auto self(shared_from_this());
-        server_sock.async_connect(*iter,
-            [this, self, iter](boost::system::error_code ec) {
-                if (!ec) {
-                    request.is_accept = true;
-                    do_write_reply();
-                } else {
-                    #if 0
-                    cerr << "Connect to " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
-                    #endif
-                    show_error("do_connect with iter", ec.value(), ec.message());
                     request.is_accept = false;
                     do_write_reply();
                     do_close();
@@ -552,14 +540,15 @@ public:
         server_sock.close();
     }
 
-    void show_socks() {
-        string src_ip_addr = client_sock.remote_endpoint().address().to_string();
-        string src_port = to_string(static_cast<unsigned short>(client_sock.remote_endpoint().port()));
+    void setup_server_endpoint(string address, uint16_t port) {
+        server_ep = tcp::endpoint(address::from_string(address), port);
+    }
 
-        cout << "<S_IP>: " << src_ip_addr << endl
-            << "<S_PORT>: " << src_port << endl
-            << "<D_IP>: " << request.address << endl
-            << "<D_PORT>: " << request.port << endl
+    void show_socks() {
+        cout << "<S_IP>: " << client_ep.address().to_string() << endl
+            << "<S_PORT>: " << client_ep.port() << endl
+            << "<D_IP>: " << server_ep.address().to_string() << endl
+            << "<D_PORT>: " << server_ep.port() << endl
             << "<Command>: " << cmd2str(request.command) << endl
             << "<Reply>: " << cmd2str((request.is_accept == true) ? COMMAND_ACCEPT : COMMAND_REJECT) << endl;
     }
@@ -569,6 +558,8 @@ private:
     SocksInfo request;
     tcp::resolver resolver_;
     tcp::acceptor acceptor_;
+    tcp::endpoint client_ep;
+    tcp::endpoint server_ep;
     
     char client_buffer[BUFFER_SIZE];
     char server_buffer[BUFFER_SIZE];
