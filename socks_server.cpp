@@ -630,7 +630,7 @@ int main(int argc, char* argv[]) {
 
         io_context.run();
     } catch (exception &e) {
-        cerr << "Exception: " << e.what() << "\n";
+        // cerr << "Exception: " << e.what() << "\n";
     }
 
     return 0;
