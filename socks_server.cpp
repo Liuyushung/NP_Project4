@@ -5,6 +5,7 @@
 #include <memory>
 #include <utility>
 #include <strings.h>
+#include <regex>
 #include <boost/asio.hpp>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -17,8 +18,6 @@ using boost::asio::ip::address;
 using boost::asio::ip::tcp;
 using boost::asio::io_service;
 using namespace std;
-
-boost::asio::io_context io_context;
 
 typedef struct socks_info {
     uint8_t  version;
@@ -35,6 +34,9 @@ const uint8_t COMMAND_CONNECT = 1;
 const uint8_t COMMAND_BIND    = 2;
 const uint8_t COMMAND_ACCEPT  = 90;
 const uint8_t COMMAND_REJECT  = 91;
+
+boost::asio::io_context io_context;
+regex SOCKS_4A_PATTERN("0\\.0\\.0\\.([1-9]|[1-9]\\d|[1]\\d\\d|[2][0-5][0-5])"); // Match 0.0.0.1 ~ 0.0.0.255
 
 void signal_server_handler(int sig) {
     if (sig == SIGCHLD) {
@@ -218,18 +220,26 @@ public:
                     request.need_resolve = false;
 
                     // Check it it has hostname
-                    // TODO: regex
-                    if (request.address.find("0.0.0.") != string::npos) {
-                        char tmp_buffer[256] = {'\0'};
+                    smatch no_use;
+                    if (regex_match(request.address, no_use, SOCKS_4A_PATTERN)) {
+                        char hostname_buffer[256] = {'\0'};
 
-                        int x = 8, idx = 0;
-                        while(client_buffer[x] != '\0') {
-                            tmp_buffer[idx] = client_buffer[x];
-                            ++x;
-                            ++idx;
+                        int null_counter = 0;
+                        for (size_t x=SOCKS_HEADER_SIZE, idx=0; x < length; ++x) {
+                            if (client_buffer[x] == '\0') {
+                                ++null_counter;
+                                continue;
+                            }
+                            if (null_counter == 1) {
+                                // This is domain name
+                                hostname_buffer[idx] = client_buffer[x];
+                                ++idx;
+                            } else {
+                                // Ignore other value
+                            }
                         }
 
-                        request.hostname = string(tmp_buffer);
+                        request.hostname = string(hostname_buffer);
                         request.need_resolve = true;
                         #if 0
                         cout << "Request.Hostname: " << request.hostname << endl;

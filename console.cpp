@@ -95,7 +95,7 @@ public:
 
     void handle_SOCKS() {
         /* Build SOCKS CONNECT Request */
-        uint32_t request_size = SOCKS_HEADER_SIZE + clients[session_id].host.length() + 1;
+        uint32_t request_size = SOCKS_HEADER_SIZE + clients[session_id].host.length() + 1 + 1;  // 2 NULLs
         char *request = (char *)malloc(request_size);
         bzero(request, request_size);
 
@@ -107,9 +107,11 @@ public:
         uint16_t port = static_cast<uint16_t>(stoi(clients[session_id].port));
         request[2] = port / 256;
         request[3] = port % 256;
-        // IP Address, Filled by zero
+        // IP Address, 0.0.0.x
+        request[7] = 01;
+        // User ID, Ignore
         // Hostname
-        memcpy(&request[SOCKS_HEADER_SIZE], clients[session_id].host.c_str(), clients[session_id].host.length());
+        memcpy(&request[SOCKS_HEADER_SIZE+1], clients[session_id].host.c_str(), clients[session_id].host.length());
 
         /* Send SOCKS CONNECT Request */
         auto self(shared_from_this());
