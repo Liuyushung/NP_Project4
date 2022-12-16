@@ -65,7 +65,7 @@ public:
         resolver_.async_resolve(q,
             [this, self](boost::system::error_code ec, tcp::resolver::iterator iter) {
                 if (!ec) {
-                    #if 1
+                    #if 0
                     cerr << "Resolve reuslt: " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
                     #endif
                     do_connect(iter);
@@ -83,7 +83,9 @@ public:
                 if (!ec) {
                     handle_SOCKS();
                 } else {
+                    #if 0
                     cerr << "Connect to " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
+                    #endif
                     show_error("do_connect", ec.value(), ec.message());
                     sock.close();
                 }
@@ -122,11 +124,10 @@ public:
         );
 
         /* Read SOCKS Reply */
-        char reply[SOCKS_HEADER_SIZE] = {'\0'};
-        sock.async_receive(boost::asio::buffer(reply, SOCKS_HEADER_SIZE),
-            [this, self, reply](boost::system::error_code ec, size_t length) {
+        sock.async_receive(boost::asio::buffer(socks_reply, SOCKS_HEADER_SIZE),
+            [this, self](boost::system::error_code ec, size_t length) {
                 if (!ec) {
-                    uint8_t command = reply[1];
+                    uint8_t command = socks_reply[1];
 
                     switch (command) {
                     case COMMAND_ACCEPT:
@@ -139,14 +140,14 @@ public:
                         break;
                     default:
                         cerr << "Unknown command: " << command << endl;
+                        sock.close();
+                        break;
                     }
-
                 } else {
-                    show_error("handle_SOCKS, receive reply", ec.value(), ec.message());
+                    show_error("handle_SOCKS, receive socks_reply", ec.value(), ec.message());
                 }
             }
         );
-
     }
 
     void do_read() {
@@ -242,6 +243,7 @@ private:
     tcp::socket sock;
     int session_id;
     char data_buffer[BUFFER_SIZE];
+    char socks_reply[SOCKS_HEADER_SIZE];
     ifstream input_file;
     string full_message;
 };
@@ -329,7 +331,7 @@ void parse_query() {
         }
     }
 
-    #if 1
+    #if 0
     cerr << "SOCKS Server: " << socks_server_hostname << ":" << socks_server_port << endl;
     #endif
     
@@ -397,17 +399,16 @@ void print_table(int session_id, string host, string port){
 }
 
 int main(int argc, char *argv[]) {
-    // setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=65531&f0=t1.txt&h1=nplinux2.cs.nctu.edu.tw&p1=65532&f1=t2.txt&h2=nplinux3.cs.nctu.edu.tw&p2=65533&f2=t3.txt&h3=nplinux4.cs.nctu.edu.tw&p3=65534&f3=t4.txt&h4=nplinux5.cs.nctu.edu.tw&p4=65535&f4=t5.txt", 1);
     // setenv("QUERY_STRING", "h0=nplinux2.cs.nctu.edu.tw&p0=43645&f0=t1.txt&h1=nplinux2.cs.nctu.edu.tw&p1=44899&f1=t2.txt&h2=nplinux2.cs.nctu.edu.tw&p2=35451&f2=t3.txt&h3=&p3=&f3=&h4=&p4=&f4=", 1);
-    setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=nplinux6.cs.nctu.edu.tw&sp=8787", 1);
-    // setenv("QUERY_STRING", "h0=nplinux1.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=socks&sp=8787", 1);
+    // setenv("QUERY_STRING", "h0=nplinux2.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=nplinux6.cs.nctu.edu.tw&sp=8787", 1);
+    // setenv("QUERY_STRING", "h0=nplinux2.cs.nctu.edu.tw&p0=50500&f0=t1.txt&h1=&p1=&f1=&h2=&p2=&f2=&h3=&p3=&f3=&h4=&p4=&f4=&sh=socks&sp=8787", 1);
     parse_query();
-    // print_html();
-    // for (size_t i = 0; i < clients.size(); i++) {
-    //     if (clients[i].is_active) {
-    //         print_table(i, clients[i].host, clients[i].port);
-    //     }
-    // }
+    print_html();
+    for (size_t i = 0; i < clients.size(); i++) {
+        if (clients[i].is_active) {
+            print_table(i, clients[i].host, clients[i].port);
+        }
+    }
 
     #if 0
     debug_clients();

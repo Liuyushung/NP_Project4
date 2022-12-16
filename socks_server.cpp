@@ -198,7 +198,7 @@ public:
 
                         request.hostname = string(tmp_buffer);
                         request.need_resolve = true;
-                        #if 1
+                        #if 0
                         cout << "Request.Hostname: " << request.hostname << endl;
                         #endif
                     }
@@ -316,7 +316,7 @@ public:
                     request.is_accept = true;
                     do_write_reply();
                 } else {
-                    #if 1
+                    #if 0
                     cerr << "Connect to " << iter->endpoint().address().to_string() << ":" << iter->endpoint().port() << endl;
                     #endif
                     show_error("do_connect with iter", ec.value(), ec.message());
@@ -456,7 +456,7 @@ public:
                         read_from_client();
                     }
                 } else if (ec.value() == boost::asio::error::operation_aborted) {
-                    #if 1
+                    #if 0
                     cout << "send_to_server aborted" << endl;
                     #endif
                 } else {
@@ -522,7 +522,7 @@ public:
                         read_from_server();
                     }
                 } else if (ec.value() == boost::asio::error::operation_aborted) {
-                    #if 1
+                    #if 0
                     cout << "send_to_client aborted" << endl;
                     #endif
                     client_sock.close();
