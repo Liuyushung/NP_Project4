@@ -607,9 +607,11 @@ public:
                         // Parent
                         io_context.notify_fork(boost::asio::io_context::fork_parent);
                         socket.close();
+                        do_accept();
                     }
+                } else {
+                    show_error("server do_accept", ec.value(), ec.message());
                 }
-                do_accept();
             }
         );
     }
