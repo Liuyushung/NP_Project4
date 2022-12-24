@@ -587,25 +587,55 @@ public:
         do_accept();
     }
 
+    bool add_entry(string address) {
+        pair<string, int> p(address, 1);
+        pair<map<string, int>::iterator, bool> ret;
+        bool is_pass = false;
+
+        ret = hosts_map.insert(p);
+
+        if (ret.second == true) {
+            is_pass = true;
+        } else {
+            if (hosts_map[address] < 2) {
+                hosts_map[address]++;
+                is_pass = true;
+            } else {
+                is_pass = false;
+            }
+        }
+
+        #if 0
+        cout << address << ": " << hosts_map[address] << endl;
+        #endif
+
+        return is_pass;
+    }
+
     void do_accept() {
         acceptor_.async_accept(
             [this](boost::system::error_code ec, tcp::socket socket) {
                 if (!ec) {
-                    pid_t pid;
-                    io_context.notify_fork(boost::asio::io_context::fork_prepare);
-                    pid = fork();
+                    if (add_entry(socket.remote_endpoint().address().to_string())) {
+                        pid_t pid;
+                        io_context.notify_fork(boost::asio::io_context::fork_prepare);
+                        pid = fork();
 
-                    if (pid < 0) {
-                        socket.close();
-                        perror("Fork");
-                    } else if (pid == 0) {
-                        // Child
-                        io_context.notify_fork(boost::asio::io_context::fork_child);
-                        acceptor_.close();
-                        make_shared<ProxyHandler>(move(socket))->start();
+                        if (pid < 0) {
+                            socket.close();
+                            perror("Fork");
+                        } else if (pid == 0) {
+                            // Child
+                            io_context.notify_fork(boost::asio::io_context::fork_child);
+                            acceptor_.close();
+                            make_shared<ProxyHandler>(move(socket))->start();
+                        } else {
+                            // Parent
+                            io_context.notify_fork(boost::asio::io_context::fork_parent);
+                            socket.close();
+                            do_accept();
+                        }
                     } else {
-                        // Parent
-                        io_context.notify_fork(boost::asio::io_context::fork_parent);
                         socket.close();
                         do_accept();
                     }
@@ -618,6 +648,7 @@ public:
 
 private:
     tcp::acceptor acceptor_;
+    map<string, int> hosts_map;
 };
 
 int main(int argc, char* argv[]) {
