@@ -37,12 +37,16 @@ const uint8_t COMMAND_REJECT  = 91;
 
 boost::asio::io_context io_context;
 regex SOCKS_4A_PATTERN("0\\.0\\.0\\.([1-9]|[1-9]\\d|[1]\\d\\d|[2][0-5][0-5])"); // Match 0.0.0.1 ~ 0.0.0.255
+map<string, int> hosts_map;
+map<pid_t, string> pid_to_address;
 
 void signal_server_handler(int sig) {
     if (sig == SIGCHLD) {
         int stat;
-        while(waitpid(-1, &stat, WNOHANG) > 0) {
+        pid_t pid;
+        while((pid = waitpid(-1, &stat, WNOHANG)) > 0) {
             // Remove zombie process
+            hosts_map[pid_to_address[pid]]--;
         }
     }
 }
@@ -632,6 +636,7 @@ public:
                         } else {
                             // Parent
                             io_context.notify_fork(boost::asio::io_context::fork_parent);
+                            pid_to_address[pid] = socket.remote_endpoint().address().to_string();
                             socket.close();
                             do_accept();
                         }
@@ -648,7 +653,6 @@ public:
 
 private:
     tcp::acceptor acceptor_;
-    map<string, int> hosts_map;
 };
 
 int main(int argc, char* argv[]) {
